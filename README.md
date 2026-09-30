@@ -6,8 +6,6 @@ Atari ST game Core
 
 > An arcade vector infiltration game crafted for the **Atari ST** family of computers, inspired by the high-voltage neon aesthetics arcade games.
 
-Written by **Ninjabuffy**.
-
 ---
 
 ## 🕹️ Overview
@@ -92,10 +90,10 @@ To run the game in **[Hatari](https://hatari.tuxfamily.org/)**:
 hatari --machine ste \
   --tos tos162se.img \
   -d /path/to/game/folder \
-  --auto core2.prg
+  --auto core.prg
 ```
 
-Or copy `core2.prg` into a `.st` disk image and boot directly from floppy drive A:.
+Or copy `core.prg` into a `.st` disk image and boot directly from floppy drive A:.
 
 ---
 
@@ -105,14 +103,6 @@ Tested and verified on:
 - **Atari 520ST / 1040ST / Mega ST** (TOS 1.02 / 1.04)
 - **Atari STE / Mega STE** (TOS 1.62 / 2.06)
 - **Hatari Emulator** (ST & STE modes)
-
----
-
-## 📜 Credits
-
-- **Game Design & Code**: [Ninjabuffy](https://github.com/Ninjabuffy)
-- **Inspiration**: Bally Midway's *TRON* (1982)
-- **Platform**: Atari Corporation (Jack Tramiel era, 1985–1993)
 
 ---
 
