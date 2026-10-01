@@ -7,6 +7,8 @@
  * ============================================================================
  */
 
+/* No external music binary — custom YM2149 chiptune engine below */
+
 /* --- Hardware & OS Variables (Global for inline assembly access) --- */
 long  os_arg1_l;
 long  os_arg2_l;
@@ -696,53 +698,94 @@ void draw_number(char *screen, short x, short y, long val, short digits, short c
     draw_text(screen, x, y, buf, color);
 }
 
-/* --- YM2149 Chiptune Music & Audio Engine --- */
-static const unsigned short note_periods[73] = {
-       0, 3822, 3608, 3405, 3214, 3034, 2863, 2703, 2551, 2408, 2273, 2145,
-    2025, 1911, 1804, 1703, 1607, 1517, 1432, 1351, 1276, 1204, 1136, 1073,
-    1012,  956,  902,  851,  804,  758,  716,  676,  638,  602,  568,  536,
-     506,  478,  451,  426,  402,  379,  358,  338,  319,  301,  284,  268,
-     253,  239,  225,  213,  201,  190,  179,  169,  159,  150,  142,  134,
-     127,  119,  113,  106,  100,   95,   89,   84,   80,   75,   71,   67,
-      63
+/* ================================================================
+ * TRON Eerie Chiptune Engine — YM2149 Direct Hardware
+ * 3 channels: Lead (A), Bass (B), Percussion (C/Noise)
+ * Key: D minor, ~100 BPM, atmospheric/eerie
+ * ================================================================ */
+
+/* Direct YM2149 register write (supervisor mode, bypasses OS) */
+static void ym_write(short reg, short val)
+{
+    volatile unsigned char *psg = (volatile unsigned char *)0xFF8800L;
+    psg[0] = (unsigned char)reg;
+    psg[2] = (unsigned char)val;
+}
+
+/* Note period table: 4 octaves × 12 semitones (C2–B5) */
+/* Period = 125000 / frequency  (YM2149 at 2 MHz master clock) */
+static const unsigned short note_tbl[48] = {
+    /* C    C#    D    Eb    E     F    F#    G    Ab    A    Bb    B  */
+    1911,1804,1703,1607,1517,1432,1351,1276,1204,1136,1073,1012, /* Oct 2 */
+     955, 902, 851, 804, 758, 716, 676, 638, 602, 568, 536, 506, /* Oct 3 */
+     478, 451, 426, 402, 379, 358, 338, 319, 301, 284, 268, 253, /* Oct 4 */
+     239, 225, 213, 201, 190, 179, 169, 159, 150, 142, 134, 127  /* Oct 5 */
 };
 
-static const unsigned char lead_vol_env[10] = { 10, 10, 10, 10, 9, 9, 8, 7, 4, 0 };
-static const unsigned char bass_vol_env[10] = {  8,  8,  7,  7, 6, 5, 4, 0, 0, 0 };
+/* Pattern data: pairs of (note_index, duration_in_ticks). 0xFF = rest.
+ * Note index = semitone + 12*octave_offset where Oct2=0, Oct3=12, Oct4=24, Oct5=36
+ * Semitones: C=0 C#=1 D=2 Eb=3 E=4 F=5 F#=6 G=7 Ab=8 A=9 Bb=10 B=11 */
 
-static const unsigned char music_lead_notes[64] = {
-    /* Section 1: D minor synth theme */
-    39, 42, 46, 42,  39, 41, 42, 44,
-    42, 39, 35, 39,  42, 44, 46, 47,
-    44, 41, 37, 41,  44, 46, 47, 49,
-    46, 41, 37, 41,  46, 44, 41, 38,
-
-    /* Section 2: Soaring Octave variation */
-    51, 46, 42, 46,  51, 53, 54, 56,
-    54, 51, 47, 51,  54, 56, 58, 59,
-    56, 53, 49, 53,  56, 58, 59, 61,
-    58, 56, 53, 50,  46, 42, 38,  0
+/* LEAD (Channel A): Eerie D-minor arpeggios with chromatic tension
+ * 4 phrases × 48 ticks = 192 ticks total (~3.8 seconds at 50Hz) */
+static const unsigned char lead_pat[] = {
+    /* Dm add 9 */
+    26, 6, 33, 6, 38, 6, 40, 6,  38, 6, 33, 6, 40, 12,
+    /* Bb maj 7 */
+    22, 6, 29, 6, 34, 6, 38, 6,  34, 6, 29, 6, 38, 12,
+    /* Gm 9 */
+    19, 6, 26, 6, 31, 6, 38, 6,  31, 6, 26, 6, 38, 12,
+    /* A 7 (tension) */
+    21, 6, 25, 6, 28, 6, 33, 6,  37, 6, 33, 6, 40, 12,
 };
+#define LEAD_PAT_LEN ((unsigned short)sizeof(lead_pat))
 
-static const unsigned char music_bass_notes[64] = {
-    /* Section 1 Bass */
-    15, 27, 15, 22,  15, 27, 18, 20,
-    11, 23, 11, 18,  11, 23, 15, 18,
-    13, 25, 13, 20,  13, 25, 17, 20,
-    10, 22, 10, 17,  10, 22, 14, 17,
-
-    /* Section 2 Bass */
-    15, 27, 15, 22,  15, 27, 18, 20,
-    11, 23, 11, 18,  11, 23, 15, 18,
-    13, 25, 13, 20,  13, 25, 17, 20,
-    10, 22, 10, 17,  10, 14, 17, 22
+/* BASS (Channel B): Deep sustained drone with chromatic movement
+ * 4 notes × 48 ticks = 192 ticks total */
+static const unsigned char bass_pat[] = {
+    14, 48,  10, 48,   7, 48,   9, 48,
 };
+#define BASS_PAT_LEN ((unsigned short)sizeof(bass_pat))
 
-short sound_decay = 0;
-short sound_sfx_pitch = 0;
-short music_enabled = 1;
-static short music_step = 0;
-static short music_tick = 0;
+/* NOISE PERCUSSION (Channel C): Metallic hi-hats and snares
+ * Values are noise period (4=bright hi-hat, 12=low snare). 0xFF=rest.
+ * 24 ticks total (loops 8× per lead/bass cycle) */
+static const unsigned char noise_pat[] = {
+     4, 2, 0xFF, 4,
+     4, 2, 0xFF, 4,
+    12, 4, 0xFF, 2,
+     4, 2, 0xFF, 4,
+};
+#define NOISE_PAT_LEN ((unsigned short)sizeof(noise_pat))
+
+/* Sequencer state per channel */
+static unsigned short mus_lead_pos, mus_bass_pos, mus_noise_pos;
+static unsigned char mus_lead_tick, mus_bass_tick, mus_noise_tick;
+static unsigned char mus_lead_vol, mus_bass_vol, mus_noise_vol;
+static unsigned char mus_lead_dur, mus_bass_dur, mus_noise_dur;
+static unsigned char mus_lead_note, mus_bass_note, mus_noise_note;
+
+void music_init(void)
+{
+    mus_lead_pos = 0; mus_bass_pos = 0; mus_noise_pos = 0;
+
+    mus_lead_note = lead_pat[0]; mus_lead_dur = lead_pat[1];
+    mus_lead_tick = mus_lead_dur;
+    mus_lead_vol  = (mus_lead_note == 0xFF) ? 0 : 12;
+    mus_lead_pos  = 2;
+
+    mus_bass_note = bass_pat[0]; mus_bass_dur = bass_pat[1];
+    mus_bass_tick = mus_bass_dur;
+    mus_bass_vol  = (mus_bass_note == 0xFF) ? 0 : 10;
+    mus_bass_pos  = 2;
+
+    mus_noise_note = noise_pat[0]; mus_noise_dur = noise_pat[1];
+    mus_noise_tick = mus_noise_dur;
+    mus_noise_vol  = (mus_noise_note == 0xFF) ? 0 : 8;
+    mus_noise_pos  = 2;
+
+    ym_write(7, 0xFC); /* Tone A+B on, tone C off, all noise off, ports output */
+}
 
 /* Multi-frame SFX system: descending sweep for drop, ascending for core */
 #define SFX_NONE    0
@@ -750,145 +793,233 @@ static short music_tick = 0;
 #define SFX_LAND    2
 #define SFX_CRASH   3
 #define SFX_CORE    4
+#define SFX_START   5
 static short sfx_type = SFX_NONE;
 static short sfx_frame = 0;
+short music_enabled = 1;
 
-void sound_init(void)
+void music_play(void)
 {
-    music_step = 0;
-    music_tick = 0;
-    sound_decay = 0;
-    sound_sfx_pitch = 0;
-    sfx_type = SFX_NONE;
-    sfx_frame = 0;
-    os_psg_write(7, 0xF8); /* Tone A, B, C enabled; Noise disabled; Port A/B outputs ACTIVE for floppy */
-    os_psg_write(8, 0);
-    os_psg_write(9, 0);
-    os_psg_write(10, 0);
-}
+    unsigned short period;
+    unsigned char mixer;
+    short play_music = music_enabled;
 
-void sound_play(short pitch, short vol)
-{
-    sound_sfx_pitch = pitch;
-    sound_decay = vol;
-    sfx_type = SFX_NONE;
-    os_psg_write(0, pitch & 0xFF);
-    os_psg_write(1, (pitch >> 8) & 0x0F);
-    os_psg_write(8, vol);
-}
+    if (play_music) {
+        /* === Lead channel (A): eerie melody === */
+        if (mus_lead_tick > 0) {
+            mus_lead_tick--;
+            /* Volume envelope: 1-tick attack hold, then linear decay */
+            if (mus_lead_note != 0xFF && mus_lead_tick < (unsigned char)(mus_lead_dur - 1)) {
+                if (mus_lead_vol > 0) mus_lead_vol--;
+            }
+        }
+        if (mus_lead_tick == 0) {
+            mus_lead_note = lead_pat[mus_lead_pos];
+            mus_lead_dur  = lead_pat[mus_lead_pos + 1];
+            mus_lead_tick = mus_lead_dur;
+            mus_lead_vol  = (mus_lead_note == 0xFF) ? 0 : 12;
+            mus_lead_pos += 2;
+            if (mus_lead_pos >= LEAD_PAT_LEN) mus_lead_pos = 0;
+        }
 
-void sound_play_sfx(short type)
-{
-    sfx_type = type;
-    sfx_frame = 0;
-    sound_decay = 0; /* SFX system takes over channel A */
-}
+        /* === Bass channel (B): deep drone === */
+        if (mus_bass_tick > 0) {
+            mus_bass_tick--;
+        }
+        if (mus_bass_tick == 0) {
+            mus_bass_note = bass_pat[mus_bass_pos];
+            mus_bass_dur  = bass_pat[mus_bass_pos + 1];
+            mus_bass_tick = mus_bass_dur;
+            mus_bass_pos += 2;
+            if (mus_bass_pos >= BASS_PAT_LEN) mus_bass_pos = 0;
+        }
+        /* Bass volume: slow pulse between 8 and 11 for breathing feel */
+        if (mus_bass_note != 0xFF) {
+            mus_bass_vol = (unsigned char)(8 + ((mus_bass_tick >> 2) & 3));
+        } else {
+            mus_bass_vol = 0;
+        }
 
-void sound_update(void)
-{
-    unsigned char lead_n, bass_n;
-    unsigned short pitch_val;
+        /* === Noise channel (C): percussion === */
+        if (mus_noise_tick > 0) {
+            mus_noise_tick--;
+            /* Quick percussion decay */
+            if (mus_noise_note != 0xFF && mus_noise_vol > 0) {
+                if (mus_noise_vol >= 2) mus_noise_vol -= 2;
+                else mus_noise_vol = 0;
+            }
+        }
+        if (mus_noise_tick == 0) {
+            mus_noise_note = noise_pat[mus_noise_pos];
+            mus_noise_dur  = noise_pat[mus_noise_pos + 1];
+            mus_noise_tick = mus_noise_dur;
+            mus_noise_vol  = (mus_noise_note == 0xFF) ? 0 : 8;
+            mus_noise_pos += 2;
+            if (mus_noise_pos >= NOISE_PAT_LEN) mus_noise_pos = 0;
+        }
+    }
 
-    /* Channel A: Sound Effects */
+    /* === Write all YM2149 registers === */
+
+    /* Channel A: Game Sound Effects Overlay OR Lead Tone */
     if (sfx_type != SFX_NONE) {
         short sfx_vol = 0;
         unsigned short sfx_p = 0;
 
         switch (sfx_type) {
         case SFX_DROP:
-            /* Descending pitch swoosh — 12 frames */
-            sfx_p = 200 + sfx_frame * 40;  /* pitch descends (period rises) */
+            sfx_p = 200 + sfx_frame * 40;
             sfx_vol = (sfx_frame < 8) ? 12 : (12 - (sfx_frame - 8) * 3);
             if (sfx_frame >= 12) sfx_type = SFX_NONE;
             break;
         case SFX_LAND:
-            /* Quick bright ping — 8 frames */
             sfx_p = 120 + (sfx_frame < 3 ? 0 : sfx_frame * 8);
             sfx_vol = (sfx_frame < 2) ? 15 : (15 - sfx_frame * 2);
             if (sfx_frame >= 8) sfx_type = SFX_NONE;
             break;
         case SFX_CRASH:
-            /* Low thud — 10 frames, descending pitch */
             sfx_p = 600 + sfx_frame * 60;
             sfx_vol = (sfx_frame < 3) ? 15 : (15 - sfx_frame);
             if (sfx_frame >= 10) sfx_type = SFX_NONE;
             break;
         case SFX_CORE:
-            /* Ascending triumphant arpeggio — 20 frames, 4 ascending notes */
-            if      (sfx_frame < 5)  sfx_p = note_periods[39]; /* D4 */
-            else if (sfx_frame < 10) sfx_p = note_periods[42]; /* F4 */
-            else if (sfx_frame < 15) sfx_p = note_periods[46]; /* A4 */
-            else                     sfx_p = note_periods[51]; /* D5 */
+            if      (sfx_frame < 5)  sfx_p = 253;
+            else if (sfx_frame < 10) sfx_p = 213;
+            else if (sfx_frame < 15) sfx_p = 179;
+            else                     sfx_p = 127;
             sfx_vol = (sfx_frame < 16) ? 15 : (15 - (sfx_frame - 16) * 4);
             if (sfx_frame >= 20) sfx_type = SFX_NONE;
+            break;
+        case SFX_START:
+            sfx_p = 0x120;
+            sfx_vol = (sfx_frame < 3) ? 15 : (15 - (sfx_frame - 3) * 4);
+            if (sfx_frame >= 6) sfx_type = SFX_NONE;
             break;
         }
 
         if (sfx_vol < 0) sfx_vol = 0;
+        
         if (sfx_type != SFX_NONE) {
-            os_psg_write(0, sfx_p & 0xFF);
-            os_psg_write(1, (sfx_p >> 8) & 0x0F);
-            os_psg_write(8, sfx_vol);
+            ym_write(0, (unsigned char)(sfx_p & 0xFF));
+            ym_write(1, (unsigned char)((sfx_p >> 8) & 0x0F));
+            ym_write(8, (unsigned char)sfx_vol);
+        } else if (play_music && mus_lead_note != 0xFF && mus_lead_vol > 0) {
+            period = note_tbl[mus_lead_note];
+            ym_write(0, (unsigned char)(period & 0xFF));
+            ym_write(1, (unsigned char)((period >> 8) & 0x0F));
+            ym_write(8, mus_lead_vol);
         } else {
-            os_psg_write(8, 0);
+            ym_write(8, 0);
         }
         sfx_frame++;
-    } else if (sound_decay > 0) {
-        sound_decay--;
-        os_psg_write(0, sound_sfx_pitch & 0xFF);
-        os_psg_write(1, (sound_sfx_pitch >> 8) & 0x0F);
-        os_psg_write(8, sound_decay);
     } else {
-        os_psg_write(8, 0);
-    }
-
-    if (!music_enabled) {
-        os_psg_write(9, 0);
-        os_psg_write(10, 0);
-        return;
-    }
-
-    /* Channel B: Melodic Synth Lead (clean singing tone) */
-    lead_n = music_lead_notes[music_step];
-    if (lead_n == 0 || lead_n >= 73) {
-        os_psg_write(9, 0);
-    } else {
-        pitch_val = note_periods[lead_n];
-        /* Subtle gentle vibrato on frames 5..7 */
-        if (music_tick >= 5 && music_tick <= 7) {
-            pitch_val += (music_tick & 1) ? 2 : -2;
+        if (play_music && mus_lead_note != 0xFF && mus_lead_vol > 0) {
+            period = note_tbl[mus_lead_note];
+            /* Vibrato: after 6 ticks, alter period slightly */
+            if (mus_lead_dur > 6 && (mus_lead_dur - mus_lead_tick) > 6) {
+                if (mus_lead_tick & 2) period += 2;
+                else period -= 2;
+            }
+            ym_write(0, (unsigned char)(period & 0xFF));
+            ym_write(1, (unsigned char)((period >> 8) & 0x0F));
+            ym_write(8, mus_lead_vol);
+        } else {
+            ym_write(8, 0);
         }
-        os_psg_write(2, pitch_val & 0xFF);
-        os_psg_write(3, (pitch_val >> 8) & 0x0F);
-        os_psg_write(9, lead_vol_env[music_tick]);
     }
 
-    /* Channel C: Deep Warm Bassline */
-    bass_n = music_bass_notes[music_step];
-    if (bass_n == 0 || bass_n >= 73) {
-        os_psg_write(10, 0);
+    /* Channel B: Bass tone */
+    if (play_music && mus_bass_note != 0xFF && mus_bass_vol > 0) {
+        period = note_tbl[mus_bass_note];
+        ym_write(2, (unsigned char)(period & 0xFF));
+        ym_write(3, (unsigned char)((period >> 8) & 0x0F));
+        ym_write(9, mus_bass_vol);
     } else {
-        pitch_val = note_periods[bass_n];
-        os_psg_write(4, pitch_val & 0xFF);
-        os_psg_write(5, (pitch_val >> 8) & 0x0F);
-        os_psg_write(10, bass_vol_env[music_tick]);
+        ym_write(9, 0);
     }
 
-    /* Advance Music Clock (10 frames = 0.20s per note, steady 150 BPM) */
-    music_tick++;
-    if (music_tick >= 10) {
-        music_tick = 0;
-        music_step = (music_step + 1) & 63;
+    /* Channel C: Noise percussion */
+    if (play_music && mus_noise_note != 0xFF && mus_noise_vol > 0) {
+        ym_write(6, mus_noise_note);
+        ym_write(10, mus_noise_vol);
+    } else {
+        ym_write(10, 0);
     }
+
+    /* Mixer */
+    mixer = 0xFC;
+    if (play_music && mus_noise_vol > 0 && mus_noise_note != 0xFF) {
+        mixer = 0xDC;
+    }
+    ym_write(7, mixer);
+}
+
+void music_exit(void)
+{
+    ym_write(8, 0);
+    ym_write(9, 0);
+    ym_write(10, 0);
+    ym_write(7, 0xFF); /* mute all, ports output for floppy safety */
+}
+
+static long last_vbl_count = 0;
+
+void sound_init(void)
+{
+    short nvbls = *(volatile short *)0x454L;
+    volatile long *vblq = (volatile long *)(*(volatile long *)0x456L);
+    int i;
+    short installed = 0;
+
+    sfx_type = SFX_NONE;
+    sfx_frame = 0;
+    last_vbl_count = *(volatile long *)0x466L;
+    music_init();
+
+    /* Install music_play into system VBL queue */
+    for (i = 0; i < nvbls; i++) {
+        if (vblq[i] == (long)music_play) {
+            installed = 1;
+            break;
+        }
+    }
+    if (!installed) {
+        for (i = 0; i < nvbls; i++) {
+            if (vblq[i] == 0) {
+                vblq[i] = (long)music_play;
+                break;
+            }
+        }
+    }
+}
+
+void sound_play_sfx(short type)
+{
+    sfx_type = type;
+    sfx_frame = 0;
+}
+
+void sound_update(void)
+{
+    /* Music and SFX are now driven exclusively by the VBL interrupt (50Hz),
+     * ensuring perfectly smooth audio playback even during frame drops.
+     * This function is kept empty for backwards compatibility with main(). */
 }
 
 void sound_stop(void)
 {
-    os_psg_write(8, 0);
-    os_psg_write(9, 0);
-    os_psg_write(10, 0);
-    os_psg_write(7, 0xFF); /* Mute all sound, keep Port A/B outputs ACTIVE for floppy */
-    sound_decay = 0;
+    short nvbls = *(volatile short *)0x454L;
+    volatile long *vblq = (volatile long *)(*(volatile long *)0x456L);
+    int i;
+
+    /* Remove music_play from system VBL queue */
+    for (i = 0; i < nvbls; i++) {
+        if (vblq[i] == (long)music_play) {
+            vblq[i] = 0;
+        }
+    }
+
+    music_exit();
     sfx_type = SFX_NONE;
 }
 
@@ -1139,6 +1270,7 @@ void save_high_score(void)
      * Mute sound channels and ensure Port A/B output lines (floppy drive select)
      * are active during disk access.
      */
+    music_exit();
     os_psg_write(8, 0);
     os_psg_write(9, 0);
     os_psg_write(10, 0);
@@ -1153,8 +1285,9 @@ void save_high_score(void)
         high_score_dirty = 0;
     }
 
-    /* Restore sound tone generators */
-    os_psg_write(7, 0xF8);
+    if (music_enabled) {
+        music_init();
+    }
 }
 
 short shields;
@@ -1517,8 +1650,8 @@ int main(void)
     init_tables();
     init_stars();
     init_trail_motes();
-    sound_init();
     load_high_score();
+    sound_init();
     init_game();
 
     /* Disable desktop mouse cursor */
@@ -1542,8 +1675,13 @@ int main(void)
             if (ascii == 'm' || ascii == 'M') {
                 music_enabled = !music_enabled;
                 if (!music_enabled) {
+                    music_exit();
+                    os_psg_write(8, 0);
                     os_psg_write(9, 0);
                     os_psg_write(10, 0);
+                    os_psg_write(7, 0xFF);
+                } else {
+                    music_init();
                 }
             }
 
@@ -1590,7 +1728,7 @@ int main(void)
             if (space_hit) {
                 title_screen = 0;
                 init_game();
-                sound_play(0x120, 15);
+                sound_play_sfx(SFX_START);
             }
         } else {
             /* Active Game Session: Playing, Victory Sequence, or Derezzed */
@@ -1598,14 +1736,12 @@ int main(void)
                 /* System Derezzed: Wait for Spacebar to reboot */
                 if (space_hit) {
                     init_game();
-                    sound_play(0x120, 15);
+                    sound_play_sfx(SFX_START);
                 }
             } else if (current_ring == -1) {
                 /* Victory Pulse Sequence */
                 victory_pulse++;
-                if (victory_pulse == 1)  sound_play(0x060, 15);
-                if (victory_pulse == 8)  sound_play(0x048, 15);
-                if (victory_pulse == 16) sound_play(0x030, 15);
+                if (victory_pulse == 1)  sound_play_sfx(SFX_CORE);
 
                 if (victory_pulse > 35) {
                     score += (500 * (current_difficulty + 1)) * level;
